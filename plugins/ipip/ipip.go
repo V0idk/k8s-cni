@@ -1,6 +1,8 @@
 package ipip
 
 import (
+	"crypto/rand"
+	"fmt"
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
@@ -14,6 +16,39 @@ import (
 
 type IpipCNI struct{}
 
+func getRandomStr(length int) (string, error) {
+	str := make([]byte, length)
+	_, err := rand.Read(str)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate random str: %v", err)
+	}
+	return fmt.Sprintf("%x", str), nil
+
+}
+
+// 获取跟本地节点不冲突的veth名
+func getVethNameOnHost() (string, error) {
+	for {
+		str, err := getRandomStr(4)
+		if err != nil {
+			return "", err
+		}
+		veth := fmt.Sprintf("veth%v", str)
+		_, err = netlink.LinkByName(veth)
+		if err != nil {
+			return veth, nil
+		}
+	}
+}
+
+func getVethByName(name string) (*netlink.Veth, error) {
+	veth, err := netlink.LinkByName(name)
+	if err != nil {
+		return nil, err
+	}
+	return veth.(*netlink.Veth), nil
+}
+
 func (ipip *IpipCNI) Add(args *skel.CmdArgs) error {
 	args = &skel.CmdArgs{
 		ContainerID: "308102901b7fe9538fcfc71669d505bc09f9def5eb05adeddb73a948bb4b2c8b",
@@ -24,13 +59,39 @@ func (ipip *IpipCNI) Add(args *skel.CmdArgs) error {
 		StdinData:   ([]byte)("{\"cniVersion\":\"0.3.0\",\"mode\":\"ipip\",\"name\":\"testcni\",\"subnet\":\"10.244.0.0\",\"type\":\"testcni\"}"),
 	}
 	var podIp string
-	ifName := args.IfName
+	vethContainerName := args.IfName
 
 	// 获取 netns
 	netns, err := ns.GetNS(args.Netns)
 	if err != nil {
 		return err
 	}
+
+	// 创建容器veth对
+	netns.Do(func(hostNS ns.NetNS) error {
+		vethHostName, err := getVethNameOnHost()
+		if err != nil {
+			return err
+		}
+		err = netlink.LinkAdd(&netlink.Veth{
+			LinkAttrs: netlink.LinkAttrs{
+				Name: vethContainerName,
+				MTU:  1500,
+			},
+			PeerName: vethHostName,
+		})
+		if err != nil {
+			return err
+		}
+		containerVeth, err := getVethByName(vethContainerName)
+		if err != nil {
+			return err
+		}
+		hostVeth, err := getVethByName(vethHostName)
+		if err != nil {
+			return err
+		}
+	})
 
 	var containerVeth, hostVeth *netlink.Veth
 	// 进入新创建的命名空间做以下操作:
